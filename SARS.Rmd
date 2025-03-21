@@ -1,0 +1,1547 @@
+---
+title: "SARS"
+output: html_document
+bibliography: references.bib
+---
+
+## [**Measuring growth rate and reproduction number for SARS-CoV-2 variants:**]{.underline}
+
+[SARS GitHub Repository](https://github.com/daisyjeans2/SARS "Please follow for full Project")
+
+![A coronavirus, the pathogenic agent of SARS-CoV-2](images/SARS-CoV-2.jpg)
+
+```{r setup, include=FALSE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r restore, message=FALSE, warning=FALSE, echo=FALSE, include=FALSE}
+
+#for reproducibility, I am using a renv folder 
+renv::restore()
+```
+
+```{r library, message=FALSE, warning=FALSE, echo=FALSE}
+
+#loading the appropriate libraries 
+
+library(here)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(lubridate)
+library(MCMCpack)
+library(EpiEstim)
+library(incidence)
+library(ragg)
+library(svglite)
+```
+
+### Question 1:
+
+#### 1) Download the dataset: download Genomes_per_week_in_England.csv from Canvas. This includes weekly counts of virus samples per lineage over time across England collected as part of Sanger Institute COG-UK.
+
+```{r rawgenomes, message=FALSE, warning=FALSE, echo=TRUE}
+
+#reading in the raw genomes data 
+
+genomes_raw <- read.csv(here("Data", "Genomes_per_week_in_England.csv"))
+```
+
+```{r dateformat, message=FALSE, warning=FALSE, echo=TRUE}
+
+genomes_raw$date <- as.Date(genomes_raw$date) #correctly organising the date format
+```
+
+#### 2) Classify major lineages: identify the following variants as major lineages: B.1.1.7 (Alpha), B.1.617.2 (Delta), BA.1, BA.2, BA.2.75, BA.4, BA.5, BA.5.3 (BQ.1), and XBB. Group all other lineages into a single category labelled as Other.
+
+```{r majorlineages, message=FALSE, warning=FALSE, echo=TRUE}
+
+# Giving a name to each of the "major" lineages 
+
+major_lineages <- c(
+  "B.1.1.7" = "Alpha",
+  "B.1.617.2" = "Delta",
+  "BA.1" = "BA.1",
+  "BA.2" = "BA.2",
+  "BA.2.75" = "BA.2.75",
+  "BA.4" = "BA.4",
+  "BA.5" = "BA.5",
+  "BA.5.3" = "BQ.1",
+  "XBB" = "XBB"
+)
+
+# Adding a "major lineages" column to the table; assigning the rest "Other" 
+genomes_raw <- genomes_raw %>%
+  mutate(
+    major_lineages = case_when(
+      lineage %in% names(major_lineages) ~ major_lineages[lineage],  
+      TRUE ~ "Other"  
+    )
+  )
+
+```
+
+```{r integratingmajorlineages, message=FALSE, warning=FALSE, echo=FALSE}
+
+#generating a total counts column
+
+total_counts <- aggregate(genomes_raw$count, by = list(date = genomes_raw$date), FUN = sum)
+colnames(total_counts) <- c("date", "total_counts") #assigning a name 
+genomes_raw <- merge(genomes_raw, total_counts, by = "date") #merging in the total counts
+
+#calculating the frequency for each linage 
+
+genomes_raw$lineage_frequency <- genomes_raw$count / genomes_raw$total_counts 
+
+#creating a custom palette for the "major lineages" + Other 
+
+custom_palette <- c(
+  "Alpha" = "#1f77b4", # Blue
+  "Delta" = "#ff7f0e", # Orange
+  "BA.1" = "#2ca02c",  # Green
+  "BA.2" = "#FFB400",  # Amber (replacing the red that was used, for colour-blind people)
+  "BA.2.75" = "#008B8B",  # Teal
+  "BA.4" = "#9467bd",  # Purple
+  "BA.5" = "#8c564b",  # Brown
+  "BQ.1" = "#e377c2",  # Pink
+  "XBB" = "#D2B48C",  # Light brown
+  "Other" = "#7f7f7f"  # Gray
+)
+```
+
+#### 3) Visualise the data: generate a stacked area plot showing the total counts of each major lineage over time.
+
+```{r totalcountplot, message=FALSE, warning=FALSE, echo=FALSE}
+
+#generating the "Total Count" plot 
+
+ggplot(genomes_raw, aes(x = date, y = count, fill = major_lineages)) +
+    geom_area(position = "stack") +  
+    scale_fill_manual(values = custom_palette) 
+    labs(
+      title = "Total count of major lineages over time",
+      x = "Collection date",
+      y = "Total Count",
+      fill = "Major lineage"
+    ) +
+    theme_minimal()
+```
+
+#### 3b) Generate another stacked area plot showing the frequencies (proportions) of each major lineage over time.
+
+```{r frequencyplot, message=FALSE, warning=FALSE, echo=FALSE}
+
+#Generating the "Frequncy" Plot 
+
+ggplot(genomes_raw, aes(x = date, y = lineage_frequency, fill = major_lineages)) +
+    geom_area(position = "fill") + 
+    scale_fill_manual(values = custom_palette) +  
+    labs(
+      title = "Frequency of major lineages over time",
+      x = "Collection date",
+      y = "Proportion",
+      fill = "Major lineage"
+    ) +
+    theme_minimal()
+```
+
+### Question 2:
+
+#### 1) Visualise the COG-UK and ONS-CIS data for BA.2: plot the frequency trajectory for the BA.2 variant using both the Sanger dataset (weekly counts) and the ONS-CIS dataset (10-day bin counts from the practical).
+
+```{r BA.2subset, message=FALSE, warning=FALSE, echo=FALSE}
+
+#Subsetting the COG-UK data for BA.2 
+
+BA.2 <- subset(
+  genomes_raw,
+  major_lineages %in% c("BA.2")
+)
+```
+
+```{r BA.2time, message=FALSE, warning=FALSE, echo=TRUE}
+
+#Visualising COG-UK BA.2 frequency across time (amber colourscheme maintained for consistency)
+
+BA.2$date <- as.Date(BA.2$date, format = "%m-%d-%y")
+
+ggplot(BA.2, aes(x = date, y = lineage_frequency, color = major_lineages, group = major_lineages)) +
+  geom_line(linewidth = 1) +  
+  geom_point(size = 2, alpha = 0.75) +  
+  scale_color_manual(
+    values = c("BA.2" = "yellow"),
+    labels = c("BA.2")
+  ) +
+  scale_x_date(
+    limits = as.Date(c("2022-01-01", "2022-04-25")),  
+  ) +
+  labs(
+    title = "COG-UK: Frequency Trajectory of BA.2",
+    x = "(Collection) Date",
+    y = "Proportion",
+    color = "Major Lineages"
+  ) +
+  theme_minimal()
+```
+
+```{r ONS-CISdata, message=FALSE, warning=FALSE, echo=FALSE}
+
+# first, we need to import the ONS-CIS daily genomic sequence data
+
+ONS_url <- "https://raw.githubusercontent.com/mg878/variant_fitness_practical/main/lineage_data.csv"
+
+ONS_data <- read.csv(ONS_url) #read it in as a csv
+
+# again, correct the date format 
+ONS_data$date <- as.Date(ONS_data$collection_date)
+```
+
+```{r ONSsummary, message=FALSE, warning=FALSE, echo=FALSE}
+
+#next, we need to aggregate the data 
+
+ONS_summary <- aggregate(
+  ONS_data$major_lineage,
+  by = list(collection_date = ONS_data$collection_date, major_lineage = ONS_data$major_lineage),
+  FUN = length
+)
+
+# here, I am renaming the columns so we can keep track of the various variables within this dataset 
+
+colnames(ONS_summary) <- c("date", "major_lineages", "count")
+
+# here, we calculate the total counts 
+total_ONS_counts <- aggregate(ONS_summary$count, by = list(date = ONS_summary$date), FUN = sum)
+colnames(total_ONS_counts) <- c("date", "total_counts")
+
+# here, we merge the total counts back into the lineage summary
+ONS_summary <- merge(ONS_summary, total_ONS_counts, by = "date")
+
+# finally, we can calculate the frequencies
+ONS_summary$frequency <- ONS_summary$count / ONS_summary$total_counts
+```
+
+```{r binningONS, message=FALSE, warning=FALSE, echo=FALSE}
+
+# binning ONS-CIS BA.2 will reduce our stochasiticity 
+
+ONS_summary$date_bin <- as.Date(
+  floor(as.numeric(as.Date(ONS_summary$date)) / 10) * 10, origin = "1970-01-01"
+)
+
+# to do this, we must aggregate our lineage counts for each 10-day bin
+ONS_summary_binned <- aggregate(
+  count ~ date_bin + major_lineages,
+  data = ONS_summary,
+  FUN = sum
+)
+
+# next, we need to calculate the total counts within each bin
+binned_total_counts <- aggregate(
+  count ~ date_bin,
+  data = ONS_summary_binned,
+  FUN = sum
+)
+
+# again, I am renaming the column names to keep track of them
+colnames(binned_total_counts) <- c("date_bin", "total_counts")  
+
+# then, we can merge the total counts back into the binned data
+ONS_summary_binned <- merge(ONS_summary_binned, binned_total_counts, by = "date_bin")
+
+# this allows us to recalculate the binned frequencies
+ONS_summary_binned$frequency <- ONS_summary_binned$count / ONS_summary_binned$total_counts
+```
+
+```{r BA.2binsubset, message=FALSE, warning=FALSE, echo=FALSE}
+
+#Subsetting the data for BA.2 under the ONS-CIS data
+
+ONS_binned_BA.2 <- subset(
+  ONS_summary_binned,
+  major_lineages %in% c("BA.2")
+)
+```
+
+```{r BA.2binned, message=FALSE, warning=FALSE, echo=TRUE}
+
+# Visualising the ONS-CIS binned data using ggplot 
+
+ggplot(ONS_binned_BA.2, aes(x = date_bin, y = frequency, color = major_lineages, group = major_lineages)) +
+  geom_line(linewidth = 1) +  
+  geom_point(size = 2, alpha = 0.75) +  
+  scale_color_manual(
+    values = c("BA.2" = "yellow"), #again, amber colourscheme maintained for consistency 
+    labels = c("BA.2")
+  ) +
+  scale_x_date(
+    limits = as.Date(c("2022-01-01", "2022-04-25")),  
+  ) +
+  labs(
+    title = "ONS-CIS: Frequency Trajectory of BA.2",
+    x = "(Collection) Date (10-Day Bins)",
+    y = "Proportion (Frequency)",
+    color = "Major Lineages"
+  ) +
+  theme_minimal()
+```
+
+#### 2) Analysis: compare the two trajectories.
+
+[***Is there a difference in the timing of BA.2’s rise and when it reaches fixation?***]{.underline}
+
+In the COVID-19 Genomics UK Consortium (COG-UK) dataset, it appears that BA.2 begins to rise in mid-January. Whereas, the Office for National Statistics COVID-19 Infection Survey (ONS-CIS) dataset shows BA.2 beginning to rise slightly earlier on, in early January.
+
+In the COG-UK dataset, BA.2 appears to reach fixation in late April. However, in the ONS-CIS dataset, BA.2 also appears to reach fixation earlier, in early April.
+
+[***Reflect on potential reasons for these differences (sampling strategies and geographical or temporal biases in data collection)?***]{.underline}
+
+Both projects occurred over the scope of three years, from 2020 to 2023. Clearly, BA.2 emerged in January 2022, which is within the temporal scope of both projects to be running efficiently. However, since it appears that BA.2 both rises, and reaches fixation earlier in the ONS-CIS dataset, that this dataset is potentially more sensitive to the early reception of data, which may be being overlooked in the COG-UK approach. We can explain this in the following manner:
+
+Firstly, the COG-UK data is opportunistically, as opposed to systematically sampled (as in the case for the ONS-CIS) - this makes it uneven. In terms of the COG-UK data, the samples are derived from Lighthouse Labs, covering most of the Pillar 2 testing in England - this is therefore at the community level, including sites both in the household and also in more integrated community institutions [@peacock2021]. However, it is important to note that these community-level infrastructures; such as schools that are capable of running testing efforts, or local surge testing efforts, will not be even across the geography of the UK - they are therefore unrepresentative. This partly because i) they may be dependent upon socioeconomic factors such as the ability to financially set up, staff and maintain the facilities and efforts of data collection and ii) it may be physically easier to set up these facilities in city-based, populous geographies, with more structure and staff available. Moreover, the way the community testing is structured may not be an even coverage of the COVID spread, which itself was not uniform across the UK, but dependent upon population factors such as density and mobility [@fry2020]. This is important because it means that certain strains which may have been circulating at lower levels in less tested regions that are unrepresented by the approach would not be perceived.
+
+However, the ONS-CIS is a household-based participation surveillance study conducted across a representative sample of UK households, upon people who may or may not be presenting symptoms. As such, the survey, whilst being arguably more limited in scope as it does not consider the community level, is more systematic. It is notable that only the cases with a high viral load (Ct \< 30) were sent for sequencing, which would exclude the strain identification of weaker strains, which may have potentially been circulating at lower virulences, and therefore lower viral loads. However, the fact that it is representative removes the potential socioeconomic skew of the COG-UK data, meaning that the full breadth of circulating strains across the UK geography is more likely to be appreciated with this approach. Hence, it is more robust to phenomena such as superspreading events, geographic heterogeneity, and temporal changes in policy interventions (such as mask mandates and travel bans), which all occur at an inconsistent local scale. This explains the earlier reception of the rise and fixation of BA.2 under the ONS-CIS approach.
+
+Notably, the pattern of systematic approaches appreciating data patterns earlier than opportunistic approaches has been recapitulated for other pathogens - such as the West Nile virus [@ferguson2014]- as well as in other Kingdoms, such as in the Plants [@parnell2015].
+
+### Question 3:
+
+#### 1) Using the Sanger dataset, determine which variant—B.1.617.2, BA.1, or BA.2—reached fixation the fastest and exhibited the highest selective advantage under a logistic growth model. Use weekly counts to measure the selective advantage (𝑠).
+
+```{r logistic, message=FALSE, warning=FALSE, echo=FALSE}
+
+#assigning the pre-defined logistic growth function 
+
+logistic_growth <- function(t, s, f0) {
+  (f0 * exp(s * t)) / (1 + f0 * (exp(s * t) - 1))
+}
+```
+
+```{r B1.617.2plot, message=FALSE, warning=FALSE, echo=FALSE}
+
+#first, we must create a plot for the B.1.617.2 growth data, in order to visualise which timeframe would be best to run the logistic growth function 
+
+#assigning the B.1.617.2 data 
+
+B.1.617.2_data <- subset(genomes_raw, major_lineages == "Delta")
+
+#orange colour kept constant
+
+generalB.1.617.2 <- ggplot(B.1.617.2_data, aes(x = date, y = lineage_frequency)) +
+  geom_line(color = "orange", linewidth = 1) +  
+  geom_point(size = 2, alpha = 0.75, color = "orange") +  
+  labs(
+    title = "Frequency Trajectory (Daily) of B.1.617.2",
+    x = "(Collection) Date",
+    y = "Proportion"
+  ) +
+  theme_minimal()
+```
+
+```{r B.1.617.2growth, message=FALSE, warning=FALSE, echo=FALSE}
+
+#now, we are setting the timeframe across which B.1.617.2 will be measured, informed by the general graph seen above 
+
+B.1.617.2_growth <- B.1.617.2_data[
+  B.1.617.2_data$date >= as.Date("2021-04-23") & B.1.617.2_data$date <= as.Date("2021-07-12"),
+]
+
+# next, we can fit the logistic model to the B.1.617.2 data
+B.1.617.2_nls_fit <- nls(
+  lineage_frequency ~ logistic_growth(as.numeric(date - min(date)), s, f0),
+  data = B.1.617.2_growth,
+  start = list(s = 0.1, f0 = min(B.1.617.2_growth$lineage_frequency))  
+)
+
+# next, we can extract the B.1.617.2 growth rate from the model 
+B.1.617.2_rate <- coef(B.1.617.2_nls_fit)["s"]
+
+# now, we can smoothen out the dates, to easily visualise the logistic curve
+smoothened_B.1.617.2_dates <- seq(min(B.1.617.2_growth$date),
+                    max(B.1.617.2_growth$date), by = "1 day")
+
+# finally, we need to calculate the predicted B.1.617.2 frequencies for the smoothened dates 
+smoothened_B.1.617.2_predictions <- data.frame(
+  date = smoothened_B.1.617.2_dates,
+  predicted_frequency = logistic_growth(as.numeric(smoothened_B.1.617.2_dates - min(B.1.617.2_growth$date)),
+                                         coef(B.1.617.2_nls_fit)["s"], coef(B.1.617.2_nls_fit)["f0"])
+)
+```
+
+```{r smoothenedplot, message=FALSE, warning=FALSE, echo=FALSE}
+
+# Visualising the B.1.617.2 growth, alongside the fitted regression
+# I am choosing to keep the orange colourscheme for the raw points, for continuity
+# I am setting a new convention that regression lines will be drawn in black
+
+ggplot(B.1.617.2_growth, aes(x = date)) +
+  geom_point(aes(y = lineage_frequency), color = "orange", size = 2, alpha = 0.75) +
+  geom_line(data = smoothened_B.1.617.2_predictions, aes(x = date, y = predicted_frequency), color = "black", size = 1) +
+  annotate(
+    "text", 
+    x = as.Date("2021-05-15"), 
+    y = 0.8, 
+    label = paste0("s= ", round(B.1.617.2_rate, 4)), 
+    color = "orange", 
+    size = 5
+  ) +
+  labs(
+    title = "Logistic Growth Fit for Delta Variant Frequency",
+    x = "Collection date",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+```
+
+```{r B.1.617.2timetofix, message=FALSE, warning=FALSE, echo=TRUE}
+
+#calculating the time-to-fixation for B.1.617.2
+
+#we use the smoothened predictions, and find the date where the virus reaches a "fixation" level of 0.99 (99%)
+
+fixed_B.1.617.2 <- smoothened_B.1.617.2_predictions %>%
+  filter(predicted_frequency >= 0.99) %>%
+  summarize(fixation_date = min(date))
+
+#we then need to find the date of emergence (init_date), where frequency is >0.01 (1%), from the beginning of our modelled period
+
+B.1.617.2_init_date <- smoothened_B.1.617.2_predictions %>%
+  filter(predicted_frequency >= 0.01 & date >= as.Date("2021-04-23")) %>%
+  summarize(init_date = min(date))
+
+#the fixation (fix) time, is the difference between the fixed date and the init date
+
+B.1.617.2_fix_time <- as.numeric(fixed_B.1.617.2$fixation_date[1] - B.1.617.2_init_date$init_date[1])
+
+#print 
+
+B.1.617.2_fix_time
+```
+
+```{r BA.1logistic, message=FALSE, warning=FALSE, echo=FALSE}
+#repeat this process for BA.1, green colour kept constant for consistency 
+
+BA.1_data <- subset(genomes_raw, major_lineages == "BA.1")
+
+general_BA.1 <- ggplot(BA.1_data, aes(x = date, y = lineage_frequency)) +
+  geom_line(color = "green", linewidth = 1) +  
+  geom_point(size = 2, alpha = 0.75, color = "green") +  
+  labs(
+    title = "Frequency Trajectory (Daily) of BA.1",
+    x = "(Collection) Date",
+    y = "Proportion"
+  ) +
+  theme_minimal()
+```
+
+```{r BA.1growth, message=FALSE, warning=FALSE, echo=FALSE}
+BA.1_growth <- BA.1_data[
+  BA.1_data$date >= as.Date("2021-12-01") & BA.1_data$date <= as.Date("2022-02-01"),
+]
+
+BA.1_nls_fit <- nls(
+  lineage_frequency ~ logistic_growth(as.numeric(date - min(date)), s, f0),
+  data = BA.1_growth,
+  start = list(s = 0.1, f0 = min(BA.1_growth$lineage_frequency))  
+)
+
+BA.1_rate <- coef(BA.1_nls_fit)["s"]
+
+smoothened_BA.1_dates <- seq(min(BA.1_growth$date),
+                    max(BA.1_growth$date), by = "1 day")
+
+smoothened_BA.1_predictions <- data.frame(
+  date = smoothened_BA.1_dates,
+  predicted_frequency = logistic_growth(as.numeric(smoothened_BA.1_dates - min(BA.1_growth$date)),
+                                         coef(BA.1_nls_fit)["s"], coef(BA.1_nls_fit)["f0"])
+)
+```
+
+```{r BA.1growthplot, message=FALSE, warning=FALSE, echo=FALSE}
+
+# green colour kept for the raw points for consistency, black for the logistic model
+
+ggplot(BA.1_growth, aes(x = date)) +
+  geom_point(aes(y = lineage_frequency), color = "green", size = 2, alpha = 0.75) +
+  geom_line(data = smoothened_BA.1_predictions, aes(x = date, y = predicted_frequency), color = "black", size = 1) +
+  annotate(
+    "text", 
+    x = as.Date("2022-01-01"), 
+    y = 0.8, 
+    label = paste0("s= ", round(BA.1_rate, 4)), 
+    color = "green", 
+    size = 5
+  ) +
+  scale_x_date(
+    limits = as.Date(c("2021-12-01", "2022-02-01")),  
+  ) +
+  labs(
+    title = "Logistic Growth Fit for BA.1 Variant Frequency",
+    x = "Collection date",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+```
+
+```{r BA.1timetofix, message=FALSE, warning=FALSE, echo=FALSE}
+
+fixed_BA.1 <- smoothened_BA.1_predictions %>%
+  filter(predicted_frequency >= 0.99) %>%
+  summarize(fixation_date = min(date))
+
+BA.1_init_date <- smoothened_BA.1_predictions %>%
+  filter(predicted_frequency >= 0.01 & date >= as.Date("2021-12-01")) %>% #making sure to keep the origin date consistent with the strain
+  summarize(init_date = min(date))
+
+BA.1_fix_time <- as.numeric(fixed_BA.1$fixation_date[1] - BA.1_init_date$init_date[1])
+
+BA.1_fix_time
+```
+
+```{r BA.2logistic, message=FALSE, warning=FALSE, echo=FALSE}
+
+#repeat for BA.2, amber colour kept constant for consistency 
+
+BA.2_data <- subset(genomes_raw, major_lineages == "BA.2")
+
+general_BA.2 <- ggplot(BA.2_data, aes(x = date, y = lineage_frequency)) +
+  geom_line(color = "yellow", linewidth = 1) +  # amber maintained for consistency
+  geom_point(size = 2, alpha = 0.75, color = "yellow") +  
+  labs(
+    title = "Frequency Trajectory (Daily) of BA.2",
+    x = "(Collection) Date",
+    y = "Proportion"
+  ) +
+  theme_minimal()
+```
+
+```{r BA.2growth, message=FALSE, warning=FALSE, echo=FALSE}
+
+BA.2_growth <- BA.2_data[
+  BA.2_data$date >= as.Date("2022-01-01") & BA.2_data$date <= as.Date("2022-05-01"),
+]
+
+BA.2_nls_fit <- nls(
+  lineage_frequency ~ logistic_growth(as.numeric(date - min(date)), s, f0),
+  data = BA.2_growth,
+  start = list(s = 0.1, f0 = min(BA.2_growth$lineage_frequency))  
+)
+
+BA.2_rate <- coef(BA.2_nls_fit)["s"]
+
+smoothened_BA.2_dates <- seq(min(BA.2_growth$date),
+                    max(BA.2_growth$date), by = "1 day")
+
+smoothened_BA.2_predictions <- data.frame(
+  date = smoothened_BA.2_dates,
+  predicted_frequency = logistic_growth(as.numeric(smoothened_BA.2_dates - min(BA.2_growth$date)),
+                                         coef(BA.2_nls_fit)["s"], coef(BA.2_nls_fit)["f0"])
+)
+```
+
+```{r BA.2growthplot, message=FALSE, warning=FALSE, echo=FALSE}
+
+#plotting the BA.2 growth with associated s value
+# amber colour kept for the raw points for consistency, black for the logistic model
+
+ggplot(BA.2_growth, aes(x = date)) +
+  geom_point(aes(y = lineage_frequency), color = "yellow", size = 2, alpha = 0.75) +
+  geom_line(data = smoothened_BA.2_predictions, aes(x = date, y = predicted_frequency), color = "black", size = 1) +
+  annotate(
+    "text", 
+    x = as.Date("2022-02-01"), 
+    y = 0.8, 
+    label = paste0("s= ", round(BA.2_rate, 4)), 
+    color = "black", #for legibility
+    size = 5
+  ) +
+  scale_x_date(
+    limits = as.Date(c("2022-01-01", "2022-05-01")),  
+  ) +
+  labs(
+    title = "Logistic Growth Fit for BA.2 Variant Frequency",
+    x = "Collection date",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+```
+
+```{r BA.2timetofix, message=FALSE, warning=FALSE, echo=FALSE}
+
+#calculating the BA.2 time-to-fixation 
+
+fixed_BA.2 <- smoothened_BA.2_predictions %>%
+  filter(predicted_frequency >= 0.99) %>%
+  summarize(fixation_date = min(date))
+
+BA.2_init_date <- smoothened_BA.2_predictions %>%
+  filter(predicted_frequency >= 0.01 & date >= as.Date("2022-01-01")) %>% #making sure to keep the origin date consistent
+  summarize(init_date = min(date))
+
+BA.2_fix_time <- as.numeric(fixed_BA.2$fixation_date[1] - BA.2_init_date$init_date[1])
+
+BA.2_fix_time
+```
+
+[***Which variant - B.1.617.2, BA.1 or BA.2 reached fixation the fastest?***]{.underline}
+
+I chose to tackle this question by defining "reached fixation the fastest" as meaning ["having the least time between its observed emergence, and the point at which its lineage frequency was \>99%"]{.underline}, since it is methodologically almost impossible to measure fixation to the theoretical definition of 100%.
+
+In order to calculate this, for each variant I found the date at which their respective lineage frequencies became \> 99%, and subtracted this from the date of their observed emergence - thus giving rise to their "time-to-fixation". This observed "time-to-fixation" is printed under each plot, as seen above, and summarised in the table below.
+
+[It is clear that:]{.underline}
+
+| Strain    | Time-to-Fixation |
+|-----------|------------------|
+| B.1.617.2 | 59               |
+| BA.1      | 32               |
+| BA.2      | 88               |
+
+: Time-to-Fixation for different Strains
+
+As such, the speed of fixation was: **BA.1 \> B.1.617.2 \> BA.2**.
+
+Ultimately, [BA.1 reached fixation the fastest]{.underline}.
+
+[***Which variant - B.1.617.2, BA.1 or BA.2 exhibited the highest selective advantage under a logistic growth model?***]{.underline}
+
+The "selective advantage", calculated as the selection coefficient (*s*), is printed in a visible location in each graph.
+
+The formula for the selection coefficient is the following:
+
+$$
+\log \left( \frac{f(t)}{1 - f(t)} \right) = s \cdot t + f(0)
+$$
+
+where:
+
+-   $f(t)$ is the lineage frequency at time $t$,
+
+-   $s$ is the selection coefficient (sometimes generalised as the growth rate), and
+
+-   $f(0)$ is the initial, non-zero variant frequency.
+
+It is clear that:
+
+| Strain    | Selection Coefficient  | Growth Speed (%) |
+|-----------|------------------------|------------------|
+| B.1.617.2 | 0.1259                 | 12.6%            |
+| BA.1      | 0.2593                 | 25.9%            |
+| BA.2      | 0.1037                 | 10.4%            |
+
+: Selection Coefficient (*s*) of different strains
+
+As such, the *s* between variants is: **BA.1 \> B.1.617.2 \> BA.2**.
+
+Ultimately, [BA.1 had the highest selective advantage under this logistic growth model]{.underline}.
+
+It is pleasing that the time-to-fixation and selective advantage patterns recapitulate one another, as it corroborates the observation that BA.1 had the fastest time to fixation, demonstrating a stronger selective advantage, than B.1.617.2, and (s)lowest being BA.2. If the patterns did not match, it would demand querying.
+
+### Question 4:
+
+#### 1) **Load the dataset:** download and load delta-d2.rds.
+
+```{r deltaraw, message=FALSE, warning=FALSE, echo=TRUE}
+
+#load the delta dataset into R 
+
+delta_raw <- readRDS("/Users/Shared/SARS/data/delta_raw.rds")
+
+#cleaning the regional NAs from the data 
+
+delta_clean <- subset(delta_raw, phecname != "")
+```
+
+```{r regionaggregate, message=FALSE, warning=FALSE, echo=FALSE}
+
+#grouping the data by region for each day
+
+  aggregating_data <- delta_clean %>%
+  group_by(date, phecname) %>% 
+  summarize(
+    true_count = sum(Delta == TRUE), 
+    false_count = sum(Delta == FALSE), 
+    .groups = 'drop' # this means that we drop the grouping, after we have summarised
+  )
+  
+#calculating the daily frequencies for each region
+  
+delta_daily_frequency <- delta_clean %>%
+  group_by(date, phecname) %>% 
+  summarize(
+    true_frequency = mean(Delta == TRUE),  
+    false_frequency = mean(Delta == FALSE), 
+    .groups = 'drop' 
+  )
+```
+
+#### 2) Analyse and Visualise the Data.
+
+2i) Plot Delta frequencies by region over time. Use distinct colours or facets to differentiate between regions.
+
+```{r regionalfrequencyplot, message=FALSE, warning=FALSE, echo=TRUE}
+
+#creating another custom palette, this time for each region 
+
+custom_palette <- c(
+  "East Midlands" = "#1f77b4", # Blue
+  "North East" = "#ff7f0e", # Orange
+  "South West" = "#2ca02c",  # Green
+  "East of England" = "#FFB400",  # again, I am replacing the red with amber, to be more colour-blind friendly 
+  "North West" = "#008B8B",  # Teal
+  "West Midlands" = "#9467bd",  # Purple
+  "London" = "#8c564b",  # Brown
+  "South East" = "#e377c2",  # Pink
+  "York and Humber" = "#D2B48C"  # Light brown
+)
+
+#visualising a multi-facet plot for the regional frequency data 
+
+ggplot(delta_daily_frequency, aes(x = date, y = true_frequency, color = phecname)) +
+  geom_line() +
+  facet_wrap(~ phecname, scales = "free_y") +  # this creates separate facets for each region
+  scale_color_manual(values = custom_palette) +
+  labs(title = "Daily Delta Frequency for each Studied Region", 
+       x = "Date", 
+       y = "Delta (Proportion)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+2ii) Fit a logistic growth for each region. Overlay the logistic growth curves onto the frequency trajectories for each region.
+
+```{r EMlogistic, message=FALSE, warning=FALSE, echo=FALSE}
+
+#let's start with East Midlands 
+  
+EM_growth <- delta_daily_frequency[
+  delta_daily_frequency$date >= as.Date("2021-04-23") & delta_daily_frequency$date <= as.Date("2021-07-12") & delta_daily_frequency$phecname == "East Midlands",
+]
+
+EM_nls_fit <- nls(
+  true_frequency ~ logistic_growth(as.numeric(date - min(date)), s, f0),
+  data = EM_growth,
+  start = list(s = 0.1, f0 = min(EM_growth$true_frequency))  # Initial guesses
+)
+
+EM_rate <- coef(EM_nls_fit)["s"]
+
+smoothened_EM_frequency <- seq(min(EM_growth$date),
+                    max(EM_growth$date), by = "1 day")
+
+smoothened_EM_predictions <- data.frame(
+  date = smoothened_EM_frequency,
+  predicted_frequency = logistic_growth(as.numeric(smoothened_EM_frequency - min(EM_growth$date)),
+                                         coef(EM_nls_fit)["s"], coef(EM_nls_fit)["f0"])
+)
+```
+
+```{r EMplot, message=FALSE, warning=FALSE, echo=FALSE}
+
+# Visualising the EM data points, overlayed with the logistic regression
+# As per my earlier convention, I am keeping the blue colour-scheme for the raw points for continuity, but applying the logistic model in black
+
+ggplot(EM_growth, aes(x = date)) +
+  geom_point(aes(y = true_frequency), color = "blue", size = 2, alpha = 0.75) +
+  geom_line(data = smoothened_EM_predictions, aes(x = date, y = predicted_frequency), color = "black", size = 1) +
+  annotate(
+    "text", 
+    x = as.Date("2021-05-15"), 
+    y = 0.8, 
+    label = paste0("s= ", round(EM_rate, 4)), 
+    color = "blue", 
+    size = 5
+  ) +
+  labs(
+    title = "Logistic Growth Fit for Delta Variant Frequency in the East Midlands",
+    x = "Collection Date",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+```
+
+```{r EMtimetorise, message=FALSE, warning=FALSE, echo=FALSE}
+
+#calculating the EM time-to-rise (where in the regional context, rising is considered at 50% [please see write-up for citation])
+
+fixed_EM <- smoothened_EM_predictions %>%
+  filter(predicted_frequency >= 0.5) %>%
+  summarize(fixation_date = min(date))
+
+EM_init_date <- smoothened_EM_predictions %>%
+  filter(predicted_frequency >= 0.01 & date >= as.Date("2021-01-01")) %>% #making sure to keep the origin date consistent
+  summarize(init_date = min(date))
+
+EM_fix_time <- as.numeric(fixed_EM$fixation_date[1] - EM_init_date$init_date[1])
+
+EM_fix_time
+```
+
+```{r EoElogistic, message=FALSE, warning=FALSE, echo=FALSE}
+
+#repeat for East of England
+  
+EoE_growth <- delta_daily_frequency[
+  delta_daily_frequency$date >= as.Date("2021-04-23") & delta_daily_frequency$date <= as.Date("2021-07-12") & delta_daily_frequency$phecname == "East of England",
+]
+
+EoE_nls_fit <- nls(
+  true_frequency ~ logistic_growth(as.numeric(date - min(date)), s, f0),
+  data = EoE_growth,
+  start = list(s = 0.1, f0 = min(EoE_growth$true_frequency))  
+)
+
+EoE_rate <- coef(EoE_nls_fit)["s"]
+
+smoothened_EoE_frequency <- seq(min(EoE_growth$date),
+                    max(EoE_growth$date), by = "1 day")
+
+smoothened_EoE_predictions <- data.frame(
+  date = smoothened_EoE_frequency,
+  predicted_frequency = logistic_growth(as.numeric(smoothened_EoE_frequency - min(EoE_growth$date)),
+                                         coef(EoE_nls_fit)["s"], coef(EoE_nls_fit)["f0"])
+)
+```
+
+```{r EoEplot, message=FALSE, warning=FALSE, echo=FALSE}
+
+# Visualise the EoE datapoints, alongside the logistic model
+# Yellow for raw data, black for logistic model 
+
+ggplot(EoE_growth, aes(x = date)) +
+  geom_point(aes(y = true_frequency), color = "yellow", size = 2, alpha = 0.75) +
+  geom_line(data = smoothened_EoE_predictions, aes(x = date, y = predicted_frequency), color = "black", size = 1) +
+  annotate(
+    "text", 
+    x = as.Date("2021-05-15"), 
+    y = 0.8, 
+    label = paste0("s= ", round(EoE_rate, 4)), 
+    color = "black", #printed black for legibility
+    size = 5
+  ) +
+  labs(
+    title = "Logistic Growth Fit for Delta Variant Frequency in the East of England",
+    x = "Collection Date",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+```
+
+```{r EoEtimetorise, message=FALSE, warning=FALSE, echo=FALSE}
+
+#calculating the EM time-to-rise
+
+fixed_EoE <- smoothened_EoE_predictions %>%
+  filter(predicted_frequency >= 0.5) %>%
+  summarize(fixation_date = min(date))
+
+EoE_init_date <- smoothened_EoE_predictions %>%
+  filter(predicted_frequency >= 0.01 & date >= as.Date("2021-01-01")) %>% #making sure to keep the origin date consistent
+  summarize(init_date = min(date))
+
+EoE_fix_time <- as.numeric(fixed_EoE$fixation_date[1] - EoE_init_date$init_date[1])
+
+EoE_fix_time
+```
+
+```{r Llogistic, message=FALSE, warning=FALSE, echo=FALSE}
+
+#repeat for London 
+  
+L_growth <- delta_daily_frequency[
+  delta_daily_frequency$date >= as.Date("2021-04-23") & delta_daily_frequency$date <= as.Date("2021-07-12") & delta_daily_frequency$phecname == "London",
+]
+
+L_nls_fit <- nls(
+  true_frequency ~ logistic_growth(as.numeric(date - min(date)), s, f0),
+  data = L_growth,
+  start = list(s = 0.1, f0 = min(L_growth$true_frequency))  
+)
+
+L_rate <- coef(L_nls_fit)["s"]
+
+smoothened_L_frequency <- seq(min(L_growth$date),
+                    max(L_growth$date), by = "1 day")
+
+smoothened_L_predictions <- data.frame(
+  date = smoothened_L_frequency,
+  predicted_frequency = logistic_growth(as.numeric(smoothened_L_frequency - min(L_growth$date)),
+                                         coef(L_nls_fit)["s"], coef(L_nls_fit)["f0"])
+)
+```
+
+```{r Lplot, message=FALSE, warning=FALSE, echo=FALSE}
+
+# Visualise the London data points, and the logistic model 
+# Brown for the data as convention, black for the logistic model 
+
+ggplot(L_growth, aes(x = date)) +
+  geom_point(aes(y = true_frequency), color = "brown", size = 2, alpha = 0.75) +
+  geom_line(data = smoothened_L_predictions, aes(x = date, y = predicted_frequency), color = "black", size = 1) +
+  annotate(
+    "text", 
+    x = as.Date("2021-05-15"), 
+    y = 0.8, 
+    label = paste0("s= ", round(L_rate, 4)), 
+    color = "brown", 
+    size = 5
+  ) +
+  labs(
+    title = "Logistic Growth Fit for Delta Variant Frequency in London",
+    x = "Collection Date",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+```
+
+```{r Ltimetorise, message=FALSE, warning=FALSE, echo=FALSE}
+
+#calculating the L time-to-rise 
+
+fixed_L <- smoothened_L_predictions %>%
+  filter(predicted_frequency >= 0.5) %>%
+  summarize(fixation_date = min(date))
+
+L_init_date <- smoothened_L_predictions %>%
+  filter(predicted_frequency >= 0.01 & date >= as.Date("2021-01-01")) %>% #making sure to keep the origin date consistent
+  summarize(init_date = min(date))
+
+L_fix_time <- as.numeric(fixed_L$fixation_date[1] - L_init_date$init_date[1])
+
+L_fix_time
+```
+
+```{r NElogistic, message=FALSE, warning=FALSE, echo=FALSE}
+
+#repeat for North East
+# range changes have to be made to ensure that the model is not applied to unchanging data (as this would be inappropriate)
+  
+NE_growth <- delta_daily_frequency[
+  delta_daily_frequency$date >= as.Date("2021-05-15") & delta_daily_frequency$date <= as.Date("2021-07-12") & delta_daily_frequency$phecname == "North East",
+] #modifying the start date to earlier, for appropriate model fit 
+
+NE_nls_fit <- nls(
+  true_frequency ~ logistic_growth(as.numeric(date - min(date)), s, f0),
+  data = NE_growth,
+  start = list(s = 0.1, f0 = min(NE_growth$true_frequency))  
+)
+
+NE_rate <- coef(NE_nls_fit)["s"]
+
+smoothened_NE_frequency <- seq(min(NE_growth$date),
+                    max(NE_growth$date), by = "1 day")
+
+smoothened_NE_predictions <- data.frame(
+  date = smoothened_NE_frequency,
+  predicted_frequency = logistic_growth(as.numeric(smoothened_NE_frequency - min(NE_growth$date)),
+                                         coef(NE_nls_fit)["s"], coef(NE_nls_fit)["f0"])
+)
+```
+
+```{r NEplot, message=FALSE, warning=FALSE, echo=FALSE}
+
+# Visualise the actual data points and the smooth logistic fit
+# Keeping the orange for the raw data as convention, black for the logistic fit 
+
+ggplot(NE_growth, aes(x = date)) +
+  geom_point(aes(y = true_frequency), color = "orange", size = 2, alpha = 0.75) +
+  geom_line(data = smoothened_NE_predictions, aes(x = date, y = predicted_frequency), color = "black", size = 1) +
+  annotate(
+    "text", 
+    x = as.Date("2021-05-20"), #modifying for legible annotation
+    y = 0.8, 
+    label = paste0("s= ", round(NE_rate, 4)), 
+    color = "orange", 
+    size = 5
+  ) +
+  labs(
+    title = "Logistic Growth Fit for Delta Variant Frequency in the North East",
+    x = "Collection Date",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+```
+
+```{r NEtimetorise, message=FALSE, warning=FALSE, echo=FALSE}
+
+#calculating the NE time-to-rise 
+
+fixed_NE <- smoothened_NE_predictions %>%
+  filter(predicted_frequency >= 0.5) %>%
+  summarize(fixation_date = min(date))
+
+NE_init_date <- smoothened_NE_predictions %>%
+  filter(predicted_frequency >= 0.01 & date >= as.Date("2021-01-01")) %>% #making sure to keep the origin date consistent
+  summarize(init_date = min(date))
+
+NE_fix_time <- as.numeric(fixed_NE$fixation_date[1] - NE_init_date$init_date[1])
+
+NE_fix_time
+```
+
+```{r NWlogistic, message=FALSE, warning=FALSE, echo=FALSE}
+
+#repeat for North West
+  
+NW_growth <- delta_daily_frequency[
+  delta_daily_frequency$date >= as.Date("2021-04-23") & delta_daily_frequency$date <= as.Date("2021-06-15") & delta_daily_frequency$phecname == "North West",
+] #modifying the end-date to earlier, for appropriate model fit 
+
+NW_nls_fit <- nls(
+  true_frequency ~ logistic_growth(as.numeric(date - min(date)), s, f0),
+  data = NW_growth,
+  start = list(s = 0.1, f0 = min(NW_growth$true_frequency))  
+)
+
+NW_rate <- coef(NW_nls_fit)["s"]
+
+smoothened_NW_frequency <- seq(min(NW_growth$date),
+                    max(NW_growth$date), by = "1 day")
+
+smoothened_NW_predictions <- data.frame(
+  date = smoothened_NW_frequency,
+  predicted_frequency = logistic_growth(as.numeric(smoothened_NW_frequency - min(NW_growth$date)),
+                                         coef(NW_nls_fit)["s"], coef(NW_nls_fit)["f0"])
+)
+```
+
+```{r NWplot, message=FALSE, warning=FALSE, echo=FALSE}
+
+# Visualise the NW datapoints alongisde their logistic fit 
+# lightblue for the raw points as per convention, black for the logistic fit 
+
+ggplot(NW_growth, aes(x = date)) +
+  geom_point(aes(y = true_frequency), color = "lightblue", size = 2, alpha = 0.75) +
+  geom_line(data = smoothened_NW_predictions, aes(x = date, y = predicted_frequency), color = "black", size = 1) +
+  annotate(
+    "text", 
+    x = as.Date("2021-05-01"), #modifying for legible annotation
+    y = 0.8, 
+    label = paste0("s= ", round(NW_rate, 4)), 
+    color = "lightblue", 
+    size = 5
+  ) +
+  labs(
+    title = "Logistic Growth Fit for Delta Variant Frequency in the North West",
+    x = "Collection Date",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+```
+
+```{r NWtimetorise, message=FALSE, warning=FALSE, echo=FALSE}
+
+#calculating the NW time-to-rise 
+
+fixed_NW <- smoothened_NW_predictions %>%
+  filter(predicted_frequency >= 0.5) %>%
+  summarize(fixation_date = min(date))
+
+NW_init_date <- smoothened_NW_predictions %>%
+  filter(predicted_frequency >= 0.01 & date >= as.Date("2021-01-01")) %>% #making sure to keep the origin date consistent
+  summarize(init_date = min(date))
+
+NW_fix_time <- as.numeric(fixed_NW$fixation_date[1] - NW_init_date$init_date[1])
+
+NW_fix_time
+```
+
+```{r SElogistic, message=FALSE, warning=FALSE, echo=FALSE}
+
+#repeat for South East
+  
+SE_growth <- delta_daily_frequency[
+  delta_daily_frequency$date >= as.Date("2021-04-23") & delta_daily_frequency$date <= as.Date("2021-07-12") & delta_daily_frequency$phecname == "South East",
+]
+
+SE_nls_fit <- nls(
+  true_frequency ~ logistic_growth(as.numeric(date - min(date)), s, f0),
+  data = SE_growth,
+  start = list(s = 0.1, f0 = min(SE_growth$true_frequency))  
+)
+
+SE_rate <- coef(SE_nls_fit)["s"]
+
+smoothened_SE_frequency <- seq(min(SE_growth$date),
+                    max(SE_growth$date), by = "1 day")
+
+smoothened_SE_predictions <- data.frame(
+  date = smoothened_SE_frequency,
+  predicted_frequency = logistic_growth(as.numeric(smoothened_SE_frequency - min(SE_growth$date)),
+                                         coef(SE_nls_fit)["s"], coef(SE_nls_fit)["f0"])
+)
+```
+
+```{r SEplot, message=FALSE, warning=FALSE, echo=FALSE}
+
+# Visualise the SE datapoints, and the logistic model fit 
+# Pink kept for raw data as per convention, black applied to the logistic model 
+
+ggplot(SE_growth, aes(x = date)) +
+  geom_point(aes(y = true_frequency), color = "pink", size = 2, alpha = 0.75) +
+  geom_line(data = smoothened_SE_predictions, aes(x = date, y = predicted_frequency), color = "black", size = 1) +
+  annotate(
+    "text", 
+    x = as.Date("2021-05-15"), 
+    y = 0.8, 
+    label = paste0("s= ", round(SE_rate, 4)), 
+    color = "pink", 
+    size = 5
+  ) +
+  labs(
+    title = "Logistic Growth Fit for Delta Variant Frequency in the South East",
+    x = "Collection Date",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+```
+
+```{r SE timetorise, message=FALSE, warning=FALSE, echo=FALSE}
+
+#calculating the SE time-to-rise
+
+fixed_SE <- smoothened_SE_predictions %>%
+  filter(predicted_frequency >= 0.5) %>%
+  summarize(fixation_date = min(date))
+
+SE_init_date <- smoothened_SE_predictions %>%
+  filter(predicted_frequency >= 0.01 & date >= as.Date("2021-01-01")) %>% #making sure to keep the origin date consistent
+  summarize(init_date = min(date))
+
+SE_fix_time <- as.numeric(fixed_SE$fixation_date[1] - SE_init_date$init_date[1])
+
+SE_fix_time
+```
+
+```{r SWlogistic, message=FALSE, warning=FALSE, echo=FALSE}
+
+#repeat for South West
+  
+SW_growth <- delta_daily_frequency[
+  delta_daily_frequency$date >= as.Date("2021-04-23") & delta_daily_frequency$date <= as.Date("2021-07-12") & delta_daily_frequency$phecname == "South West",
+]
+
+SW_nls_fit <- nls(
+  true_frequency ~ logistic_growth(as.numeric(date - min(date)), s, f0),
+  data = SW_growth,
+  start = list(s = 0.1, f0 = min(SE_growth$true_frequency))  
+)
+
+SW_rate <- coef(SW_nls_fit)["s"]
+
+smoothened_SW_frequency <- seq(min(SW_growth$date),
+                    max(SW_growth$date), by = "1 day")
+
+smoothened_SW_predictions <- data.frame(
+  date = smoothened_SW_frequency,
+  predicted_frequency = logistic_growth(as.numeric(smoothened_SW_frequency - min(SW_growth$date)),
+                                         coef(SW_nls_fit)["s"], coef(SW_nls_fit)["f0"])
+)
+```
+
+```{r SWplot, message=FALSE, warning=FALSE, echo=FALSE}
+
+# Visualise the SW data and the logistic model fit 
+# Green colour kept for raw data as per convention, model fit in black
+
+
+ggplot(SW_growth, aes(x = date)) +
+  geom_point(aes(y = true_frequency), color = "green", size = 2, alpha = 0.75) +
+  geom_line(data = smoothened_SW_predictions, aes(x = date, y = predicted_frequency), color = "black", size = 1) +
+  annotate(
+    "text", 
+    x = as.Date("2021-05-15"), 
+    y = 0.8, 
+    label = paste0("s= ", round(SW_rate, 4)), 
+    color = "green", 
+    size = 5
+  ) +
+  labs(
+    title = "Logistic Growth Fit for Delta Variant Frequency in the South West",
+    x = "Collection Date",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+```
+
+```{r SWtimetorise, message=FALSE, warning=FALSE, echo=FALSE}
+
+#calculating the SW time-to-rise
+
+fixed_SW <- smoothened_SW_predictions %>%
+  filter(predicted_frequency >= 0.5) %>%
+  summarize(fixation_date = min(date))
+
+SW_init_date <- smoothened_SW_predictions %>%
+  filter(predicted_frequency >= 0.01 & date >= as.Date("2021-01-01")) %>% #making sure to keep the origin date consistent
+  summarize(init_date = min(date))
+
+SW_fix_time <- as.numeric(fixed_SW$fixation_date[1] - SW_init_date$init_date[1])
+
+SW_fix_time
+```
+
+```{r WMlogistic, message=FALSE, warning=FALSE, echo=FALSE}
+
+#repeat for West Midlands
+# changes made so that the model is not applied to unchanging data 
+  
+WM_growth <- delta_daily_frequency[
+  delta_daily_frequency$date >= as.Date("2021-04-23") & delta_daily_frequency$date <= as.Date("2021-06-20") & delta_daily_frequency$phecname == "West Midlands",
+] #making the end date earlier for appropriate model fit 
+
+WM_nls_fit <- nls(
+  true_frequency ~ logistic_growth(as.numeric(date - min(date)), s, f0),
+  data = WM_growth,
+  start = list(s = 0.1, f0 = min(WM_growth$true_frequency))  
+)
+
+WM_rate <- coef(WM_nls_fit)["s"]
+
+smoothened_WM_frequency <- seq(min(WM_growth$date),
+                    max(WM_growth$date), by = "1 day")
+
+smoothened_WM_predictions <- data.frame(
+  date = smoothened_WM_frequency,
+  predicted_frequency = logistic_growth(as.numeric(smoothened_WM_frequency - min(WM_growth$date)),
+                                         coef(WM_nls_fit)["s"], coef(WM_nls_fit)["f0"])
+)
+```
+
+```{r WMplot, message=FALSE, warning=FALSE, echo=FALSE}
+
+# Visualise the WM data points and the smooth logistic fit
+
+ggplot(WM_growth, aes(x = date)) +
+  geom_point(aes(y = true_frequency), color = "purple", size = 2, alpha = 0.75) +
+  geom_line(data = smoothened_WM_predictions, aes(x = date, y = predicted_frequency), color = "black", size = 1) +
+  annotate(
+    "text", 
+    x = as.Date("2021-05-15"), 
+    y = 0.8, 
+    label = paste0("s= ", round(WM_rate, 4)), 
+    color = "purple", 
+    size = 5
+  ) +
+  labs(
+    title = "Logistic Growth Fit for Delta Variant Frequency in the West Midlands",
+    x = "Collection Date",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+```
+
+```{r WMtimetorise, message=FALSE, warning=FALSE, echo=FALSE}
+
+#calculating the WM time-to-rise 
+
+fixed_WM <- smoothened_WM_predictions %>%
+  filter(predicted_frequency >= 0.5) %>%
+  summarize(fixation_date = min(date))
+
+WM_init_date <- smoothened_WM_predictions %>%
+  filter(predicted_frequency >= 0.01 & date >= as.Date("2021-01-01")) %>% #making sure to keep the origin date consistent
+  summarize(init_date = min(date))
+
+WM_fix_time <- as.numeric(fixed_WM$fixation_date[1] - WM_init_date$init_date[1])
+
+WM_fix_time
+```
+
+```{r YaHlogistic, message=FALSE, warning=FALSE, echo=FALSE}
+
+#repeat for Yorkshire and Humber 
+# NB: changing parameters to make sure the model is not applied to unchanging data
+  
+YaH_growth <- delta_daily_frequency[
+  delta_daily_frequency$date >= as.Date("2021-05-15") & delta_daily_frequency$date <= as.Date("2021-06-30") & delta_daily_frequency$phecname == "Yorkshire and Humber",
+] #changing the model, extending the last date for appropriateness
+
+YaH_nls_fit <- nls(
+  true_frequency ~ logistic_growth(as.numeric(date - min(date)), s, f0),
+  data = YaH_growth,
+  start = list(s = 0.1, f0 = min(YaH_growth$true_frequency))  # Initial guesses
+)
+
+YaH_rate <- coef(YaH_nls_fit)["s"]
+
+smoothened_YaH_frequency <- seq(min(YaH_growth$date),
+                    max(YaH_growth$date), by = "1 day")
+
+smoothened_YaH_predictions <- data.frame(
+  date = smoothened_YaH_frequency,
+  predicted_frequency = logistic_growth(as.numeric(smoothened_YaH_frequency - min(YaH_growth$date)),
+                                         coef(YaH_nls_fit)["s"], coef(YaH_nls_fit)["f0"])
+)
+```
+
+```{r YaHplot, message=FALSE, warning=FALSE, echo=FALSE}
+
+# Visualise the YaH data points and the smooth logistic fit
+
+ggplot(YaH_growth, aes(x = date)) +
+  geom_point(aes(y = true_frequency), color = "beige", size = 2, alpha = 0.75) +
+  geom_line(data = smoothened_YaH_predictions, aes(x = date, y = predicted_frequency), color = "black", size = 1) +
+  annotate(
+    "text", 
+    x = as.Date("2021-06-15"), #shifted for legibility 
+    y = 0.8, 
+    label = paste0("s= ", round(YaH_rate, 4)), 
+    color = "black", #for legibility 
+    size = 5
+  ) +
+  labs(
+    title = "Logistic Growth Fit for Delta Variant Frequency in York and Humber",
+    x = "Collection Date",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+```
+
+```{r YaHtimetorise, message=FALSE, warning=FALSE, echo=FALSE}
+
+#calculating the YaH time-to-rise
+
+fixed_YaH <- smoothened_YaH_predictions %>%
+  filter(predicted_frequency >= 0.5) %>%
+  summarize(fixation_date = min(date))
+
+YaH_init_date <- smoothened_YaH_predictions %>%
+  filter(predicted_frequency >= 0.01 & date >= as.Date("2021-01-01")) %>% #making sure to keep the origin date consistent
+  summarize(init_date = min(date))
+
+YaH_fix_time <- as.numeric(fixed_YaH$fixation_date[1] - YaH_init_date$init_date[1])
+
+YaH_fix_time
+```
+
+#### 3) Interpretation:
+
+[**3i)**]{.underline}
+
+[**Identify the region with the fastest Delta outbreak:**]{.underline}
+
+In order to determine the region with the "fastest Delta outbreak", we can use a modified idea of the "selection coefficent" (s). In this case, the selective advantage would simply refer to the growth rate of the strain within that particular region.
+
+Here, it is clear that:
+
+| Region          | s      | Speed of Outbreak (%) |
+|-----------------|--------|-----------------------|
+| East Midlands   | 0.1072 | 10.7                  |
+| North East      | 0.1532 | 15.3                  |
+| South West      | 0.068  | 6.8                   |
+| East of England | 0.108  | 10.8                  |
+| North West      | 0.1229 | 12.3                  |
+| London          | 0.0892 | 8.9                   |
+| South East      | 0.1197 | 12                    |
+| York and Humber | 0.1507 | 15.1                  |
+| West Midlands   | 0.1649 | 16.5                  |
+
+As such, according to their selective advantages, the fastest Delta outbreaks occurred in the following order:
+
+The West Midlands \> The North East \> York and Humber \> The North West \> The South East \> The East of England \> The East Midlands \> London \> The South West.
+
+Ultimately, [the region with the fastest Delta outbreak was the West Midlands.]{.underline}
+
+[**Identify the region where Delta had the earliest rise in frequencies:**]{.underline}
+
+According to [@volz2021], a "rise in frequency" can be defined as reaching 50% frequency within a region. This can therefore be defined as the "time-to-rise".
+
+Here, it is clear that:
+
+| Region          | Time-to-Rise (days) |
+|-----------------|---------------------|
+| East Midlands   | 27                  |
+| North East      | 12                  |
+| South West      | 20                  |
+| East of England | 21                  |
+| North West      | 15                  |
+| London          | 19                  |
+| South East      | 22                  |
+| York and Humber | 14                  |
+| West Midlands   | 27                  |
+
+: Time-to-Rise (days) of Delta across Regions
+
+As such, the time-to-rise (defined by speed) across regions was the following:
+
+The North East \> York and Humber \> The North West \> London \> The South West \> The East of England \> The South East \> The East Midlands = The West Midlands.
+
+This is interesting, as whilst the broad pattern remains the same, it brings up 2 interesting cases:
+
+i)  London appears to have a relatively high *s* (it grew fast), but still took a relatively long time to reach 50% regional coverage.
+
+ii) The West Midlands has a very low *s* (the outbreak grew slowly), however, it had the fastest track to 50% coverage.
+
+There are a variety of potential explanations for this that would warrant further investigation. For example it might be that the high population density of London facilitated the fast spread (high *s*) [@fry2020]. However, the slow progress to 50% coverage might be explained by its better infrastructure to combat disease transmission, it's policy introductions, as well as the potential demographic factors that a melting pot population might have played in delaying disease transmission through heterogeneous pre-exising immunity in an urban setting. Dissimilarly, in the West Midlands the population demographic factors may have exerted the opposite effect, meaning that although the disease spread slowly, it reached 50% frequency faster.
+
+[**Discuss why the timing of Delta’s emergence differed between regions:**]{.underline}
+
+The differing timing of Delta's emergence between regions can be chiefly explained through network theory. Certain urban regions (like London, for example) are likely to house individuals that travel more - from a network perspective, they exhibit high connectivity. This is likely to allow Delta to emerge earlier, from its origin in India. From there, the secondary regions with the highest connectivity to the focal area are likely to experience secondary emergence [@mccrone2022]. This ramifies until the regions with the lowest connectivity to the focal region experience Delta emergence last.
+
+[**3ii) Could Delta’s growth across regions be associated with a founder effect?**]{.underline}
+
+*What is the founder effect?*
+
+The founder effect can be described as the loss of genetic variation that occurs during the colonisation of a new environment by a small group of individuals [@matute2013].
+
+*Does our observed data support or refute the hypothesis that Delta's growth across regions is associated with a founder effect?*
+
+Data that supported Delta's growth across regions as being associated with a founder effect would show a rapid emergence, followed by sequential emergence events in other regions, that rapidly rose to high frequencies, in the form of a fast outbreak. This is because the novel introduction of new genetic viral content would facilitate the spread of the pocket of founding individuals. Our data do show a rapid rise to high frequencies, and fast outbreaks across regions (although we have not compared this to any other strains as a baseline). As such, there is initial evidence of a founder effect in Delta. However, this would need to be complemented by genetic data, which could investigate whether the initial focal points of Delta emergence exhibited viruses with a higher genetic variation, and whether the secondary emergence events at the connected foci were associated with a lower genetic variation; a critical component of the founder effect. This, if found, would be further corroborating evidence of a founder effect associated with Delta transmission dynamics in the UK.
+
+### Question 5:
+
+#### 1) **Estimate the true incidence of Delta**
+
+*Does the number of PCR-positive tests sent to the Sanger Institute for sequencing reflect the true incidence of Delta infections in England?*
+
+No, because many people are likely to be infected, but not take a PCR test. This includes individuals who are, for example:
+
+i)  asymptomatic
+
+ii) elderly, disabled or infirm, and cannot access a PCR test
+
+iii) geographically isolated, and therefore do not have access
+
+iv) socioeconomically deprived, and therefore do not have access, or would not want to experience the consequences of a positive test (for example, time off work or social isolation)
+
+This not only varies from individual-to-individual, but also regionally; due to the dependence of testing upon infrastructure and policy.
+
+At the next stage downstream, not all of the PCR tests that are actually returned as positive are sent to the Sanger institute for sequencing, based on being representative of UK households.
+
+Finally, in the temporal dimension, there is an associated time delay between an individual testing positive for PCR, and the associated sequencing event at the Sanger Institute. This means that incidence reporting is likely to be necessarily delayed under sequencing approach.
+
+*How does the sequencing approach differ from incidence?*
+
+Incidence can be defined as the daily number of new infections [@ma2023]. Studying incidence has the aim of quantifying an epi/pandemic spread, and therefore aims to take into account all positive individuals.
+
+However, the sequencing approach does not necessarily show the daily number of new infections. This is because it has a different purpose altogether - it takes a systematic representative *sample* from UK households in order to understand the count data of various lineages, under an evolutionary lens. Whilst this lineage-based approach is interesting and worthwhile as it adds a evolutionary dimension to the purely numerical incidental understanding of disease transmission, the complexity of the approach means that the daily number of new infections is too far outside of a sequencing-approach scope, as it would essentially be looking to build an incidence consensus. Notably, it is probably impossible to measure the true daily number of new infections, due to the reasons listed above. As such, this response variable quantifies out best effort to achieve a proxy for incidence.
+
+```{r daily, message=FALSE, warning=FALSE, echo=FALSE}
+
+#reading in the daily raw dataset 
+
+daily_raw <- read.csv(here("data", "daily_raw.csv"))
+```
+
+To obtain a more representative estimate of the true number of Delta infections, multiply the proportion of Delta sequences in England (from the Sanger dataset) by the daily (7-day averaged) COVID-19 case counts in England provided in the daily-new-confirmed-covid-19-cases.csv dataset.
+
+```{r extractingdailydelta, message=FALSE, warning=FALSE, echo=FALSE}
+genomes_raw <- genomes_raw %>% mutate(date = as.Date(date))
+daily_raw <- daily_raw %>% mutate(date = as.Date(date))
+
+# first, we need to filter our original COG-UK dataset, for just the "Delta" data
+
+delta_data <- genomes_raw %>%
+  filter(major_lineages == "Delta") %>%
+  dplyr::select(date, lineage_frequency) %>%
+  arrange(date) #arranging it by date will help us to visualise the data easily 
+
+# next, we need to map each date of the dailycase data to its closest weekly data for the Delta proportion, so that we can merge the two aynchronous datasets 
+
+daily_raw <- daily_raw %>%
+  mutate(week_start = delta_data$date[pmax(1, findInterval(date, delta_data$date))]) %>%
+  left_join(delta_data, by = c("week_start" = "date"))
+
+# by joining the datasets together, we can multiple the count by the lineage frequency to estimate true incidence 
+
+daily_raw <- daily_raw %>%
+  mutate(estimated_delta_cases = cases_sevendayaveraged * lineage_frequency)
+```
+
+```{r plottingdeltadaily+sequence, message=FALSE, warning=FALSE, echo=FALSE}
+
+# to plot this data, we want to overlay total case count by the Delta lineage frequency
+# NB: I am keeping the orange Delta colourscheme, for continuity.
+
+COG_data <- genomes_raw %>%
+  filter(major_lineages == "Delta") %>%
+  group_by(date) %>%
+  summarize(delta_sequences = sum(count, na.rm = TRUE))
+
+# we want out plot to include a line (for the daily cases), and bars (for the weekly lineage data); this will require a double axes plot. 
+
+ggplot() +
+  geom_line(data = daily_raw, 
+            aes(x = date, y = estimated_delta_cases, color = "Delta Case Estimate"), 
+            size = 0.5) +
+  geom_bar(data = COG_data, 
+           aes(x = date, y = delta_sequences, fill = "COG-UK Delta Variant Sequences"), 
+           stat = "identity", alpha = 0.6) +
+  scale_color_manual(name = "Legend", values = c("Delta Case Estimate" = "orange")) +
+  scale_fill_manual(name = "Legend", values = c("COG-UK Delta Variant Sequences" = "black")) +
+  scale_y_continuous(
+    name = "Delta Case Estimate",
+    sec.axis = sec_axis(~ ., name = "COG-UK Delta Variant Sequences")
+  ) +
+  labs(
+    title = "Delta Daily Case Counts + Weekly COG-UK Variant Sequences",
+    x = "Date"
+  ) +
+  
+  theme_minimal() +
+  theme(legend.position = "bottom") #putting the legend at the bottom will make it more visible on a double-axes plot
+```
+
+*Why are these two counts different from each other?*
+
+The daily data counts are attempting to proxy incidence. They are a measure of the number of positive PCR tests each day, which we have filtered for Delta. However, the weekly sequencing approach is not trying to proxy incidence, but it conducting its own evolutionary analysis. This explains why it only captures a lower frequency of cases (as it is not trying to appreciate bulk growth of the epi/pandemic, but a more fine-tuned genetic approach).
+
+As to why we observe the higher values in the daily case estimate (as perceived by the orange lines generally being above the black), this is because of the greater frequency of data collection (daily as opposed to weekly) being more likely to collect data that might be otherwised missed. This is compounded by the lag of a time lag, which is associated with sequence data, but not daily incidence (which simply relies on a PCR, and not the downstream, more time-consuming sequencing element). However, it is interesting that the sequence data appears to initially show a higher true incidence. This is an interesting clue into the sequencing approach, and about how its purpose to screen for lineages might result in the faster identification of newer emerging lineages, before the higher data collection rate of the daily case count can compensate for this.
+
+#### 2) **Measure Rt**
+
+Using the estimated daily Delta case counts, calculate the time-varying reproduction number (𝑅𝑡):
+
+𝑅𝑡=𝐼(𝑡)∑𝑡𝑠=1𝐼(𝑡−𝑠)𝑤(𝑠)
+
+where 𝐼(𝑡) is the incidence at time 𝑡 , and 𝑤(𝑠) is the probability mass function of the serial interval at lag 𝑠.
+
+```{r Rt, message=FALSE, warning=FALSE, echo=FALSE}
+
+#in order to measure Rt, we first need to set a start and end date for our analysis. 
+
+start_date <- as.Date("2021-04-23")
+end_date <- as.Date("2021-11-01")
+
+# we then need to filter the data to within this timeframe only 
+filter_delta <- subset(
+  daily_raw,
+  date >= start_date & date <= end_date
+)
+
+# next, we prepare the data 
+incidence_data <- data.frame(
+  dates = filter_delta$date,
+  I = filter_delta$estimated_delta_cases  # here, we are using count as a proxy of daily incidence
+)
+
+# next, we need to define the serial interval parameters
+serial_interval <- list(mean_si = 4.1, std_si = 2.8)
+
+# this allows us to estimate Rt
+rt_results <- estimate_R(
+  incid = incidence_data,
+  method = "parametric_si",
+  config = make_config(serial_interval)
+)
+
+# which we can then plot 
+plot(rt_results, what = "R", legend = FALSE) +
+  labs(
+    title = expression("Time-varying Reproduction Number" ~ (R[t]) ~ "for Strain Delta"),
+    x = "Date",
+    y = expression("Reproduction number" ~ (R[t]))) 
+```
+
+[**Compare your 𝑅𝑡 estimate to the one calculated during the practical using the ONS-CIS dataset:**]{.underline}
+
+[Just looking at our region of interest, (January-April)]{.underline} **the R~t~ for my COG-UK data, taken as the y-intercept, is 1.9**, with confidence intervals stretching to on the upper bound \>2.
+
+In the practical using the ON-CIS data, the R~t~ was 1.85.
+
+Whilst these estimates do not differ significantly, we can see that the the COG-UK data provides a higher R~t~ than the ON-CIS data.
+
+*Which estimate do you consider more reliable, and why?*
+
+Personally, I would consider the ON-CIS dataset more likely to provide a reliable Rt. This is because, despite the extra noise introduced by the sequencing approach, it is systematic and representative in nature (as explored fully during Question 2). Notably, the ability of systematic (as opposed to opportunistic) data gathering approaches to provide a more reliable R~t~ is supported by pre-existing literature [@sherratt2021].
